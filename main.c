@@ -1,9 +1,15 @@
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <threads.h>
 
 #define LONESHA256_STATIC
 #include "lonesha256.h"
+
+#define MAX_THREADS 8
 
 void print_hash(uint8_t *hash)
 {
@@ -34,38 +40,32 @@ bool verify(uint8_t hash[32], int difficulty)
     return false;
 }
 
-int32_t main(int32_t argc, uint8_t *argv[])
+char *challenge;
+int difficulty;
+int num_threads;
+
+atomic_bool found;
+atomic_int result;
+
+typedef struct
 {
-    if (argc != 3)
-    {
-        printf("usage: %s <challenge string> <difficulty>", argv[0]);
-        return;
-    }
+    uint32_t thread_id;
+} work_ctx_t;
 
-    uint8_t *challenge = argv[1];
-
-    if (strlen(challenge) == 0)
-    {
-        printf("Challenge string must not be an empty.\n");
-        return;
-    }
-
-    uint32_t difficulty = (uint32_t)strtol(argv[2], NULL, 10);
-
-    if (difficulty <= 0)
-    {
-        printf("Difficulty must be greater than 0.\n");
-        return;
-    }
-
-    uint32_t nonce = -1;
+uint32_t work(work_ctx_t *ctx)
+{
+    uint32_t nonce = ctx->thread_id - 1;
 
     uint8_t hash[32];
     uint8_t candidate[64];
 
     do
     {
-        nonce++;
+        // Check if other threads finished
+        if (atomic_load_explicit(&found, memory_order_relaxed))
+            return -1;
+
+        nonce += num_threads;
 
         size_t len = snprintf(candidate, 64, "%s%d", challenge, nonce);
         lonesha256(hash, candidate, len);
@@ -75,5 +75,66 @@ int32_t main(int32_t argc, uint8_t *argv[])
 #endif
     } while (!verify(hash, difficulty));
 
-    printf("%d\n", nonce);
+    atomic_store(&result, nonce);
+    atomic_store_explicit(&found, true, memory_order_relaxed);
+
+    return nonce;
+}
+
+int32_t main(int32_t argc, uint8_t *argv[])
+{
+    if (argc < 3)
+    {
+        printf("usage: %s <challenge string> <difficulty> [thread count]", argv[0]);
+        return;
+    }
+
+    challenge = argv[1];
+
+    if (strlen(challenge) == 0)
+    {
+        printf("Challenge string must not be an empty.\n");
+        return;
+    }
+
+    difficulty = (uint32_t)strtol(argv[2], NULL, 10);
+
+    if (difficulty <= 0)
+    {
+        printf("Difficulty must be greater than 0.\n");
+        return;
+    }
+
+    num_threads = (argc == 4) ? (uint32_t)strtol(argv[3], NULL, 10) : 1;
+
+    if (num_threads <= 0 || num_threads > MAX_THREADS)
+    {
+        printf("Thread count must be between 1 and %d.\n", MAX_THREADS);
+        return;
+    }
+
+    thrd_t ts[MAX_THREADS];
+    work_ctx_t *args[MAX_THREADS];
+    uint32_t ns[MAX_THREADS];
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        args[i] = malloc(sizeof(work_ctx_t));
+        args[i]->thread_id = i;
+
+        if (thrd_create(ts + i, work, args[i]) != thrd_success)
+        {
+            printf("Failed to create thread %d\n", i);
+            return;
+        }
+    }
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        thrd_join(ts[i], ns + i);
+        free(args[i]);
+
+        if (ns[i] != -1)
+            printf("%d\n", ns[i]);
+    }
 }
