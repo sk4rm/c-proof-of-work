@@ -75,5 +75,5 @@ int32_t main(int32_t argc, uint8_t *argv[])
 #endif
     } while (!verify(hash, difficulty));
 
-    printf("\nfinal nonce: %d\n", nonce);
+    printf("%d\n", nonce);
 }
